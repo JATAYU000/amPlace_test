@@ -85,38 +85,43 @@ jobs:
         run: |
           python validate_pixel_update.py changes.txt changed_file_content.txt ${{ steps.pr_user.outputs.pr_user }}
 
-      # Step 8: Create a new branch and merge the PR
-      - name: Create a new branch and merge the PR
-        id: create_branch_and_merge
+      # Step 8: Create a new branch and merge the PR using the GitHub API
+      - name: Create and merge the branch
         run: |
-          PR_USER=${{ steps.pr_user.outputs.pr_user }}
-          BRANCH_NAME=$PR_USER
+          REPO=${{ github.repository }}
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          BRANCH_NAME=${{ steps.pr_user.outputs.pr_user }}
           COUNT=1
 
-          # Check if a branch with the username already exists
-          while git ls-remote --exit-code --heads origin "refs/heads/$BRANCH_NAME"; do
+          # Check if a branch with the username already exists using GitHub API
+          while curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${REPO}/git/refs/heads/$BRANCH_NAME" | grep -q 'ref'; do
             COUNT=$((COUNT+1))
-            BRANCH_NAME="${PR_USER}${COUNT}"
+            BRANCH_NAME="${{ steps.pr_user.outputs.pr_user }}${COUNT}"
           done
 
-          echo "::set-output name=branch_name::$BRANCH_NAME"
-          
-          # Create the new branch from the base branch
-          git checkout -b "$BRANCH_NAME"
-          
-          # Fetch the PR branch from the fork
-          git remote add fork https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git
-          git fetch fork ${{ github.event.pull_request.head.ref }}:pr-branch
+          # Create a new branch from the base branch
+          BASE_BRANCH=${{ github.event.pull_request.base.ref }}
+          BASE_COMMIT_SHA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${REPO}/git/refs/heads/${BASE_BRANCH}" | jq -r '.object.sha')
 
-          # Set committer identity to avoid "unknown identity" error
-          git config user.name "GitHub Action"
-          git config user.email "action@github.com"
+          # Create the new branch in the repo
+          curl -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -d "{\"ref\": \"refs/heads/${BRANCH_NAME}\", \"sha\": \"${BASE_COMMIT_SHA}\"}" \
+            "https://api.github.com/repos/${REPO}/git/refs"
+
+          # Fetch the PR branch from the fork to merge
+          FORK_REPO=${{ github.event.pull_request.head.repo.full_name }}
+          PR_BRANCH=${{ github.event.pull_request.head.ref }}
           
-          # Merge the PR branch into the new branch
-          git merge --no-ff pr-branch
+          # Get the SHA of the PR branch
+          PR_COMMIT_SHA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${FORK_REPO}/commits/${PR_BRANCH}" | jq -r '.sha')
+
+          # Create a merge commit on the new branch
+          curl -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -d "{\"base\":\"${BRANCH_NAME}\", \"head\":\"${FORK_REPO}:${PR_BRANCH}\"}" \
+            "https://api.github.com/repos/${REPO}/merges"
 
       # Step 9: Push the new branch to the repository
       - name: Push the new branch to the repository
         run: |
-          BRANCH_NAME=${{ steps.create_branch_and_merge.outputs.branch_name }}
+          BRANCH_NAME=${{ steps.pr_user.outputs.pr_user }}
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} "$BRANCH_NAME"
